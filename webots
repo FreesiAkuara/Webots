@@ -1,0 +1,171 @@
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <webots/robot.h>
+#include <webots/camera.h>
+#include <webots/compass.h>
+#include <webots/gps.h>
+#include <webots/gyro.h>
+#include <webots/inertial_unit.h>
+#include <webots/keyboard.h>
+#include <webots/led.h>
+#include <webots/motor.h>
+
+#define SIGN(x) ((x) > 0) - ((x) < 0)
+#define CLAMP(value, low, high) ((value) < (low) ? (low) : ((value) > (high) ? (high) : (value)))
+
+int main(int argc, char **argv) 
+{
+  wb_robot_init();
+  int timestep = (int)wb_robot_get_basic_time_step();
+
+  
+  WbDeviceTag imu = wb_robot_get_device("inertial unit");
+  wb_inertial_unit_enable(imu, timestep);
+  WbDeviceTag gps = wb_robot_get_device("gps");
+  wb_gps_enable(gps, timestep);
+  WbDeviceTag compass = wb_robot_get_device("compass");
+  wb_compass_enable(compass, timestep);
+  WbDeviceTag gyro = wb_robot_get_device("gyro");
+  wb_gyro_enable(gyro, timestep);
+  wb_keyboard_enable(timestep);
+ 
+  WbDeviceTag front_right_motor = wb_robot_get_device("motor41B");
+  WbDeviceTag front_left_motor = wb_robot_get_device("motor42B");
+  WbDeviceTag rear_left_motor = wb_robot_get_device("motor43B");
+  WbDeviceTag rear_right_motor = wb_robot_get_device("motor44B");
+
+  WbDeviceTag motors[4] = {front_left_motor, front_right_motor, rear_left_motor, rear_right_motor};
+  int m;
+  for (m = 0; m < 4; ++m) {
+    wb_motor_set_position(motors[m], INFINITY);
+   
+  }
+
+  printf("Start the drone...\n");
+
+  while (wb_robot_step(timestep) != -1) {
+    if (wb_robot_get_time() > 1.0)
+      break;
+  }
+
+  printf("You can control the drone with your computer keyboard:\n");
+  printf("- 'up': move forward.\n");
+  printf("- 'down': move backward.\n");
+  printf("- 'right': turn right.\n");
+  printf("- 'left': turn left.\n");
+  printf("- 'shift + up': increase the target altitude.\n");
+  printf("- 'shift + down': decrease the target altitude.\n");
+  printf("- 'shift + right': strafe right.\n");
+  printf("- 'shift + left': strafe left.\n");
+
+ 
+  const double k_vertical_thrust = 50.009;  
+  const double k_vertical_offset = 0.01;   
+  const double k_vertical_p = 18.9150;       
+  const double k_roll_p = 0.630;         
+  const double k_pitch_p = 0.10; 
+  double myk_vertical_thrustSet;
+  double mydis = 0.0;
+ 
+  double lastAltitude;
+  
+  double myk_vertical_thrustBalance = 50;
+  lastAltitude = wb_gps_get_values(gps)[2];
+ 
+  while (wb_robot_step(timestep) != -1) 
+  {
+      const double time = wb_robot_get_time();  
+  
+      
+      const double roll = wb_inertial_unit_get_roll_pitch_yaw(imu)[0];
+      const double pitch = wb_inertial_unit_get_roll_pitch_yaw(imu)[1];
+      const double altitude = wb_gps_get_values(gps)[2];
+
+      const double roll_acceleration = wb_gyro_get_values(gyro)[0];
+      const double pitch_acceleration = wb_gyro_get_values(gyro)[1];
+  
+     
+  
+     
+      double roll_disturbance = 0.0;
+      double pitch_disturbance = 0.0;
+      double yaw_disturbance = 0.0;
+  
+      int key = wb_keyboard_get_key();
+     
+      while (key > 0) 
+      {
+        switch (key) {
+          case WB_KEYBOARD_UP:
+            pitch_disturbance = -0.0200;
+            mydis += 0.1;
+            break;
+          case WB_KEYBOARD_DOWN:
+            pitch_disturbance = 0.020;
+            mydis += -0.1;
+            break;
+          case WB_KEYBOARD_RIGHT:
+            yaw_disturbance = -3.13;
+            break;
+          case WB_KEYBOARD_LEFT:
+            yaw_disturbance = 3.13;
+            break;
+          case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_RIGHT):
+            roll_disturbance = -0.0510;
+            break;
+          case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_LEFT):
+            roll_disturbance = 0.0510;
+            break;
+          case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_UP):
+            target_altitude += 0.05;
+            mydis += 1;
+            printf("target altitude: %f [m]\n", target_altitude);
+            break;
+          case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_DOWN):
+            target_altitude -= 0.05;
+            mydis += -1;
+            printf("target altitude: %f [m]\n", target_altitude);
+            break;
+        }
+        key = wb_keyboard_get_key();
+      }
+  
+     
+      const double roll_input = k_roll_p * CLAMP(roll, -1.0, 1.0) + roll_acceleration + roll_disturbance;
+      const double pitch_input = k_pitch_p * CLAMP(pitch, -1.0, 1.0) + pitch_acceleration + pitch_disturbance;
+      const double yaw_input = yaw_disturbance;
+      const double clamped_difference_altitude = CLAMP(target_altitude - altitude + k_vertical_offset, -3.0, 3.0);
+      const double vertical_input = k_vertical_p * pow(clamped_difference_altitude, 3.0) - 30 * (altitude - lastAltitude);
+      lastAltitude = altitude;
+      printf("k_vertical_thrust=%f,vertical_input=%f, roll_input=%f,pitch_input=%f,yaw_input=%f\n",k_vertical_thrust,vertical_input,roll_input,pitch_input,yaw_input);
+     
+      const double front_left_motor_input = k_vertical_thrust + vertical_input - roll_input + pitch_input - yaw_input;
+      const double front_right_motor_input = k_vertical_thrust + vertical_input + roll_input + pitch_input + yaw_input;
+      const double rear_left_motor_input = k_vertical_thrust + vertical_input - roll_input - pitch_input + yaw_input;
+      const double rear_right_motor_input = k_vertical_thrust + vertical_input + roll_input - pitch_input - yaw_input;
+      wb_motor_set_velocity(front_left_motor, front_left_motor_input);
+      wb_motor_set_velocity(front_right_motor, -front_right_motor_input);
+      wb_motor_set_velocity(rear_left_motor, -rear_left_motor_input);
+      wb_motor_set_velocity(rear_right_motor, rear_right_motor_input);
+      
+      if(true)
+      {
+        myk_vertical_thrustSet = myk_vertical_thrustBalance + mydis;
+        wb_motor_set_velocity(front_left_motor, myk_vertical_thrustSet);
+        wb_motor_set_velocity(front_right_motor, -myk_vertical_thrustSet);
+        wb_motor_set_velocity(rear_left_motor, -myk_vertical_thrustSet);
+        wb_motor_set_velocity(rear_right_motor, myk_vertical_thrustSet);
+        printf("myk_vertical_thrustSet=%f \n",myk_vertical_thrustSet);
+        printf("height:%f speed:%f,%f,%f,%f\n",altitude,front_left_motor_input,-front_right_motor_input,-rear_left_motor_input,rear_right_motor_input);
+      }
+      double speed1 = wb_motor_get_velocity(front_left_motor);
+      double speed2 = wb_motor_get_velocity(front_right_motor);
+      double speed3 = wb_motor_get_velocity(rear_left_motor);
+      double speed4 = wb_motor_get_velocity(rear_right_motor);
+      printf("targe theight：%f vs %f Read motor speed:%f,%f,%f,%f\n",target_altitude,altitude,speed1,speed2,speed3,speed4);
+      printf("\n");
+  };
+  wb_robot_cleanup();
+  return EXIT_SUCCESS;
+}
